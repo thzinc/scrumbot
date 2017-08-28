@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Akka.Actor;
 using ScrumBot.Configuration;
@@ -91,6 +93,26 @@ namespace ScrumBot
                 }
 
                 Execute().PipeTo(Self);
+            });
+
+            Receive<UserLookup>(request =>
+            {
+                var nameOrId = Regex.Replace(request.NameOrId, @"\<@(.+)\>", @"$1");
+                var success = connection.UserCache.TryGetValue(nameOrId, out var user);
+                if (!success)
+                {
+                    user = connection.UserCache.Values.FirstOrDefault(u => StringComparer.OrdinalIgnoreCase.Equals(u.Name, nameOrId));
+                    success = user != null;
+                }
+
+                Sender.Tell(new UserLookupResponse
+                {
+                    Id = user.Id,
+                    Name = user.Name,
+                    FirstName = user.FirstName,
+                    LastName = user.LastName,
+                    Success = success,
+                });
             });
 
             var self = Self;

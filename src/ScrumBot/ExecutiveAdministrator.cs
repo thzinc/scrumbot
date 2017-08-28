@@ -2,21 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using Akka.Actor;
 using ScrumBot.Messages;
 
 namespace ScrumBot
 {
-    public static class StringExtensions
-    {
-        public static string TrimStartOfEachLine(this string input, char trimChar)
-        {
-            var lines = input.Split('\n').Select(line => line.TrimStart(trimChar));
-
-            return string.Join('\n', lines);
-        }
-    }
-    public class Scribe : ReceiveActor
+    public class Scribe : ReceiveActor // TODO: Make this a persistent actor
     {
         public Scribe(IActorRef slacker)
         {
@@ -28,22 +20,85 @@ namespace ScrumBot
             var teams = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
             Receive<AddTeamMember>(add =>
             {
-                var members = teams.GetValueOrDefault(add.TeamName) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                if (members.Add(add.UserName))
+                async Task Execute()
                 {
-                    slacker.Tell(add.InResponseTo.Respond(new OutgoingMessage
+                    var userLookup = await slacker.Ask<UserLookupResponse>(new UserLookup { NameOrId = add.UserName }, TimeSpan.FromSeconds(5));
+                    var members = teams.GetValueOrDefault(add.TeamName) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    if (members.Add(userLookup.Name))
                     {
-                        Text = $"Added {add.UserName} to the {add.TeamName} team!",
-                    }));
+                        slacker.Tell(add.InResponseTo.Respond(new OutgoingMessage
+                        {
+                            Text = $"Added {userLookup.Name} to the {add.TeamName} team!",
+                        }));
+                    }
+                    else
+                    {
+                        slacker.Tell(add.InResponseTo.Respond(new OutgoingMessage
+                        {
+                            Text = $"Looks like {userLookup.Name} is already part of the {add.TeamName} team.",
+                        }));
+                    }
+                    teams[add.TeamName] = members;
                 }
-                else
+
+                Execute().PipeTo(Self);
+            });
+
+            Receive<RemoveTeamMember>(remove =>
+            {
+                async Task Execute()
                 {
-                    slacker.Tell(add.InResponseTo.Respond(new OutgoingMessage
+                    var userLookup = await slacker.Ask<UserLookupResponse>(new UserLookup { NameOrId = remove.UserName }, TimeSpan.FromSeconds(5));
+                    if (teams.TryGetValue(remove.TeamName, out var members))
                     {
-                        Text = $"Looks like {add.UserName} is already part of the {add.TeamName} team.",
-                    }));
+                        if (!members.Remove(userLookup.Name))
+                        {
+                            slacker.Tell(remove.InResponseTo.Respond(new OutgoingMessage
+                            {
+                                Text = $"Looks like {userLookup.Name} isn't in the {remove.TeamName} team",
+                            }));
+                        }
+                        else if (members.Any())
+                        {
+                            slacker.Tell(remove.InResponseTo.Respond(new OutgoingMessage
+                            {
+                                Text = $"Removed {userLookup.Name} from the {remove.TeamName} team",
+                            }));
+                        }
+                        else
+                        {
+                            teams.Remove(remove.TeamName);
+                            slacker.Tell(remove.InResponseTo.Respond(new OutgoingMessage
+                            {
+                                Text = $"Since {userLookup.Name} was the last person in the {remove.TeamName} team, I removed the team.",
+                            }));
+                        }
+                    }
+                    else
+                    {
+                        slacker.Tell(remove.InResponseTo.Respond(new OutgoingMessage
+                        {
+                            Text = $"The {remove.TeamName} team doesn't exist, so I can't remove {userLookup.Name} from it.",
+                        }));
+                    }
                 }
-                teams[add.TeamName] = members;
+
+                Execute().PipeTo(Self);
+            });
+
+            Receive<ListTeams>(msg =>
+            {
+                var teamList = string.Join("\n\n", teams
+                    .OrderBy(x => x.Key)
+                    .Select(x => $@"
+                            *{x.Key}*
+                            > {string.Join("\n> ", x.Value.OrderBy(u => u))}
+                        ".TrimStartOfEachLine(' ')));
+
+                slacker.Tell(msg.InResponseTo.Respond(new OutgoingMessage
+                {
+                    Text = teamList,
+                }));
             });
         }
     }
@@ -91,22 +146,50 @@ namespace ScrumBot
                 return false;
             }
 
-            bool IsAddTeamMember(IncomingMessage message)
+            bool IsModifyTeamMember(IncomingMessage message)
             {
-                var pattern = new Regex(@"add @?(?<UserName>\S+) to( the)? (?<TeamName>\S+)( team)?", RegexOptions.IgnoreCase);
+                var pattern = new Regex(@"(?<Command>add|remove) @?(?<UserName>\S+) (to|from)( the)? (?<TeamName>\S+)( team)?", RegexOptions.IgnoreCase);
                 var match = pattern.Match(message.Text);
                 if (match.Success)
                 {
+                    var command = match.Groups["Command"].Value.ToLower();
                     var teamName = match.Groups["TeamName"].Value;
                     var userName = match.Groups["UserName"].Value;
                     if (StringComparer.OrdinalIgnoreCase.Equals(userName, "me"))
                     {
                         userName = message.AuthorName;
                     }
-                    scribe.Tell(new AddTeamMember
+                    if (command == "add")
                     {
-                        TeamName = teamName,
-                        UserName = userName,
+                        scribe.Tell(new AddTeamMember
+                        {
+                            TeamName = teamName,
+                            UserName = userName,
+                            InResponseTo = message,
+                        });
+                    }
+                    else
+                    {
+                        scribe.Tell(new RemoveTeamMember
+                        {
+                            TeamName = teamName,
+                            UserName = userName,
+                            InResponseTo = message,
+                        });
+                    }
+                    return true;
+                }
+
+                return false;
+            }
+
+            bool IsListTeams(IncomingMessage message)
+            {
+                var pattern = new Regex(@"list (the )?teams", RegexOptions.IgnoreCase);
+                if (pattern.IsMatch(message.Text))
+                {
+                    scribe.Tell(new ListTeams
+                    {
                         InResponseTo = message,
                     });
                     return true;
@@ -117,7 +200,8 @@ namespace ScrumBot
 
             var messageHandlers = new Func<IncomingMessage, bool>[] {
                 IsHelp,
-                IsAddTeamMember,
+                IsModifyTeamMember,
+                IsListTeams,
             };
 
             Receive<IncomingMessage>(message =>
