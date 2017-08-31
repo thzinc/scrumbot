@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using Akka.Actor;
+using ExpressMapper;
 
 namespace ScrumBot
 {
@@ -10,6 +11,8 @@ namespace ScrumBot
         private ManualResetEventSlim _mre;
         public void Start()
         {
+            Mapper.Compile();
+
             _actorSystem = ActorSystem.Create("ScrumBot");
             _actorSystem.ActorOf(Props.Create(() => new ScrumBot()));
             _mre = new ManualResetEventSlim();

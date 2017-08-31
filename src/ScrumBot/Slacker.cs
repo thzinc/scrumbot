@@ -107,10 +107,10 @@ namespace ScrumBot
 
                 Sender.Tell(new UserLookupResponse
                 {
-                    Id = user.Id,
-                    Name = user.Name,
-                    FirstName = user.FirstName,
-                    LastName = user.LastName,
+                    Id = user?.Id,
+                    Name = user?.Name ?? nameOrId,
+                    FirstName = user?.FirstName,
+                    LastName = user?.LastName,
                     Success = success,
                 });
             });
